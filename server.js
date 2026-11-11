@@ -47,16 +47,41 @@ async function getNextId(tableName) {
 // ============================================================================
 // ROUTE 1: Get All Doctors (For the Top Bar Doctor Selector)
 // ============================================================================
-app.get('/api/doctors', async (req, res) => {
+// ============================================================================
+// ROUTE 1: Doctor Portal Login Authentication
+// ============================================================================
+app.post('/api/doctor/login', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('doctors_master')
-      .select('*')
-      .eq('flag', 1)
-      .order('id', { ascending: true });
+    const { username, password } = req.body;
 
-    if (error) throw error;
-    res.json(data);
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required.' });
+    }
+
+    const { data: doctor, error } = await supabase
+      .from('doctors_master')
+      .select('id, name, specialty, reg_number, username, password, flag')
+      .eq('username', username.trim())
+      .eq('flag', 1)
+      .single();
+
+    if (error || !doctor || doctor.password !== password) {
+      return res.status(401).json({ error: 'Invalid username or password.' });
+    }
+
+    // Mark doctor as online
+    await supabase
+      .from('doctors_master')
+      .update({ is_online: true })
+      .eq('id', doctor.id);
+
+    res.json({
+      id: doctor.id,
+      name: doctor.name,
+      specialty: doctor.specialty,
+      reg_number: doctor.reg_number,
+      username: doctor.username
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
