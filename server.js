@@ -141,19 +141,34 @@ app.get('/api/doctor/queue', async (req, res) => {
 // ============================================================================
 // ROUTE 3: Server-Side Paginated Patient Search
 // ============================================================================
+// ============================================================================
+// ROUTE 3: Server-Side Advanced Paginated Patient Search
+// ============================================================================
 app.get('/api/patients/search', async (req, res) => {
   try {
-    const query = (req.query.q || '').trim();
-    const page = parseInt(req.query.page || '1', 10);
+    const { name, nic, phone, dob, page: pageQuery } = req.query;
+    const page = parseInt(pageQuery || '1', 10);
     const limit = 15;
     const offset = (page - 1) * limit;
 
-    if (!query) return res.json({ data: [], page, hasMore: false });
+    // If no search parameters provided at all, return empty
+    if (!name && !nic && !phone && !dob) {
+      return res.json({ data: [], page, hasMore: false });
+    }
 
-    const { data, error } = await supabase
+    let queryBuilder = supabase
       .from('patients_master')
-      .select('id, name, reference, common, id_number, phone, birth_date, gender, weight, height, last_visit_date')
-      .or(`name.ilike.%${query}%,phone.ilike.%${query}%,id_number.ilike.%${query}%,reference.ilike.%${query}%,common.ilike.%${query}%`)
+      .select('id, name, reference, common, id_number, phone, birth_date, gender, weight, height, last_visit_date');
+
+    // Chain the filters together (AND logic)
+    if (name) queryBuilder = queryBuilder.ilike('name', `%${name.trim()}%`);
+    if (nic) queryBuilder = queryBuilder.ilike('id_number', `%${nic.trim()}%`);
+    if (phone) queryBuilder = queryBuilder.ilike('phone', `%${phone.trim()}%`);
+    
+    // For date, we expect a strict YYYY-MM-DD from the frontend date picker
+    if (dob) queryBuilder = queryBuilder.eq('birth_date', dob);
+
+    const { data, error } = await queryBuilder
       .order('id', { ascending: false })
       .range(offset, offset + limit - 1);
 
