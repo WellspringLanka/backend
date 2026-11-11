@@ -148,6 +148,7 @@ app.get('/api/patients/search', async (req, res) => {
     const limit = 15;
     const offset = (page - 1) * limit;
 
+    // If no search parameters provided, return empty
     if (!name && !nic && !phone && !dob) {
       return res.json({ data: [], page, hasMore: false });
     }
@@ -156,19 +157,28 @@ app.get('/api/patients/search', async (req, res) => {
       .from('patients_master')
       .select('id, name, reference, common, id_number, phone, birth_date, gender, weight, height, last_visit_date');
 
+    // Chain the standard filters together
     if (name) queryBuilder = queryBuilder.ilike('name', `%${name.trim()}%`);
     if (nic) queryBuilder = queryBuilder.ilike('id_number', `%${nic.trim()}%`);
-    
-    // FIX: Ignore the leading '0' for phone numbers so it matches 077... and 77...
-    if (phone) {
-      let cleanPhone = phone.trim();
-      if (cleanPhone.startsWith('0')) {
-        cleanPhone = cleanPhone.substring(1);
-      }
-      queryBuilder = queryBuilder.ilike('phone', `%${cleanPhone}%`);
-    }
-    
     if (dob) queryBuilder = queryBuilder.eq('birth_date', dob);
+
+    // BULLETPROOF PHONE SEARCH
+    if (phone) {
+      let typedPhone = phone.trim();
+      if (typedPhone.length > 0) {
+        // Create versions with and without the zero
+        let noZero = typedPhone.startsWith('0') ? typedPhone.substring(1) : typedPhone;
+        let withZero = typedPhone.startsWith('0') ? typedPhone : '0' + typedPhone;
+        
+        if (noZero.length === 0) {
+          // If they literally just typed "0"
+          queryBuilder = queryBuilder.ilike('phone', `%0%`);
+        } else {
+          // Tell database to check ALL 3 variations simultaneously
+          queryBuilder = queryBuilder.or(`phone.ilike.%${typedPhone}%,phone.ilike.%${noZero}%,phone.ilike.%${withZero}%`);
+        }
+      }
+    }
 
     const { data, error } = await queryBuilder
       .order('id', { ascending: false })
