@@ -139,9 +139,6 @@ app.get('/api/doctor/queue', async (req, res) => {
 });
 
 // ============================================================================
-// ROUTE 3: Server-Side Paginated Patient Search
-// ============================================================================
-// ============================================================================
 // ROUTE 3: Server-Side Advanced Paginated Patient Search
 // ============================================================================
 app.get('/api/patients/search', async (req, res) => {
@@ -151,7 +148,6 @@ app.get('/api/patients/search', async (req, res) => {
     const limit = 15;
     const offset = (page - 1) * limit;
 
-    // If no search parameters provided at all, return empty
     if (!name && !nic && !phone && !dob) {
       return res.json({ data: [], page, hasMore: false });
     }
@@ -160,12 +156,18 @@ app.get('/api/patients/search', async (req, res) => {
       .from('patients_master')
       .select('id, name, reference, common, id_number, phone, birth_date, gender, weight, height, last_visit_date');
 
-    // Chain the filters together (AND logic)
     if (name) queryBuilder = queryBuilder.ilike('name', `%${name.trim()}%`);
     if (nic) queryBuilder = queryBuilder.ilike('id_number', `%${nic.trim()}%`);
-    if (phone) queryBuilder = queryBuilder.ilike('phone', `%${phone.trim()}%`);
     
-    // For date, we expect a strict YYYY-MM-DD from the frontend date picker
+    // FIX: Ignore the leading '0' for phone numbers so it matches 077... and 77...
+    if (phone) {
+      let cleanPhone = phone.trim();
+      if (cleanPhone.startsWith('0')) {
+        cleanPhone = cleanPhone.substring(1);
+      }
+      queryBuilder = queryBuilder.ilike('phone', `%${cleanPhone}%`);
+    }
+    
     if (dob) queryBuilder = queryBuilder.eq('birth_date', dob);
 
     const { data, error } = await queryBuilder
