@@ -167,13 +167,12 @@ app.get('/api/patients/search', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 // ============================================================================
 // ROUTE 4: Direct Walk-In Patient Registration
 // ============================================================================
 app.post('/api/patients', async (req, res) => {
   try {
-    const { name, birth_date, phone, id_number, gender, common, weight, height } = req.body;
+    const { name, birth_date, phone, id_number, gender, married, common, weight, height } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Patient name is required' });
     }
@@ -190,7 +189,7 @@ app.post('/api/patients', async (req, res) => {
       reference: '',
       common: common || '',
       gender: gender ? Number(gender) : 1,
-      married: 0,
+      married: married ? Number(married) : 0,
       weight: weight ? Number(weight) : 0,
       height: height ? Number(height) : 0,
       registration_date: now,
@@ -211,7 +210,6 @@ app.post('/api/patients', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 // ============================================================================
 // ROUTE 5: Load Full Patient Consultation Profile & History
 // ============================================================================
