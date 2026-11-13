@@ -157,26 +157,42 @@ app.get('/api/patients/search', async (req, res) => {
       .from('patients_master')
       .select('id, name, reference, common, id_number, phone, birth_date, gender, weight, height, last_visit_date');
 
-    // Chain the standard filters together
+    // 1. Standard Filters
     if (name) queryBuilder = queryBuilder.ilike('name', `%${name.trim()}%`);
     if (nic) queryBuilder = queryBuilder.ilike('id_number', `%${nic.trim()}%`);
-    if (dob) queryBuilder = queryBuilder.eq('birth_date', dob);
 
-    // BULLETPROOF PHONE SEARCH
+    // 2. Bulletproof Phone Search
     if (phone) {
-      let typedPhone = phone.trim();
-      if (typedPhone.length > 0) {
-        // Create versions with and without the zero
-        let noZero = typedPhone.startsWith('0') ? typedPhone.substring(1) : typedPhone;
-        let withZero = typedPhone.startsWith('0') ? typedPhone : '0' + typedPhone;
+      let cleanPhone = phone.trim();
+      let noZero = cleanPhone.startsWith('0') ? cleanPhone.substring(1) : cleanPhone;
+      let withZero = cleanPhone.startsWith('0') ? cleanPhone : '0' + cleanPhone;
+      
+      if (noZero.length > 0) {
+        queryBuilder = queryBuilder.or(`phone.ilike.%${cleanPhone}%,phone.ilike.%${noZero}%,phone.ilike.%${withZero}%`);
+      }
+    }
+
+    // 3. Smart Date of Birth Search (YYYY, YYYY-MM, or YYYY-MM-DD)
+    if (dob) {
+      // Standardize slashes to dashes
+      let cleanDob = dob.trim().replace(/\//g, '-');
+      
+      if (/^\d{4}$/.test(cleanDob)) {
+        // Just a Year (e.g., "2005") -> Jan 1 to Dec 31
+        queryBuilder = queryBuilder.gte('birth_date', `${cleanDob}-01-01`).lte('birth_date', `${cleanDob}-12-31`);
         
-        if (noZero.length === 0) {
-          // If they literally just typed "0"
-          queryBuilder = queryBuilder.ilike('phone', `%0%`);
-        } else {
-          // Tell database to check ALL 3 variations simultaneously
-          queryBuilder = queryBuilder.or(`phone.ilike.%${typedPhone}%,phone.ilike.%${noZero}%,phone.ilike.%${withZero}%`);
-        }
+      } else if (/^\d{4}-\d{2}$/.test(cleanDob)) {
+        // Year and Month (e.g., "2005-12" or "2005/12")
+        const [year, month] = cleanDob.split('-');
+        
+        // JS Trick: Day 0 of the next month returns the exact last day of the current month (28, 30, or 31)
+        const lastDay = new Date(year, month, 0).getDate(); 
+        
+        queryBuilder = queryBuilder.gte('birth_date', `${cleanDob}-01`).lte('birth_date', `${cleanDob}-${lastDay}`);
+        
+      } else if (/^\d{4}-\d{2}-\d{2}$/.test(cleanDob)) {
+        // Exact Date (e.g., "1993-05-14")
+        queryBuilder = queryBuilder.eq('birth_date', cleanDob);
       }
     }
 
@@ -191,6 +207,7 @@ app.get('/api/patients/search', async (req, res) => {
       hasMore: (data || []).length === limit
     });
   } catch (err) {
+    console.error("Search Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
