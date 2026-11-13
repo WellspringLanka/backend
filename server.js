@@ -537,7 +537,27 @@ app.post('/api/doctor/bell', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// ============================================================================
+// ROUTE: Update Marital Status in patients_master
+// ============================================================================
+app.put('/api/patients/:id/marital-status', async (req, res) => {
+  try {
+    const patientId = Number(req.params.id);
+    const { married } = req.body;
 
+    const { data, error } = await supabase
+      .from('patients_master')
+      .update({ married: Number(married) })
+      .eq('id', patientId)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, married: data.married });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.listen(PORT, () => {
   console.log(`Wellspring Backend API running on http://localhost:${PORT}`);
 });
