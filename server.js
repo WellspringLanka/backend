@@ -578,3 +578,228 @@ app.put('/api/patients/:id/marital-status', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Wellspring Backend API running on http://localhost:${PORT}`);
 });
+
+// ============================================================================
+// COUNTER ROUTE 1: Encrypted Counter Staff Login
+// ============================================================================
+app.post('/api/counter/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required.' });
+    }
+
+    const { data: staff, error } = await supabase
+      .from('counter_staff_master')
+      .select('id, name, role, username, password, flag')
+      .eq('username', username.trim())
+      .eq('flag', 1)
+      .single();
+
+    if (error || !staff) {
+      return res.status(401).json({ error: 'Invalid counter username or password.' });
+    }
+
+    const isMatch = await bcrypt.compare(password, staff.password);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid counter username or password.' });
+    }
+
+    await supabase
+      .from('counter_staff_master')
+      .update({ is_online: true })
+      .eq('id', staff.id);
+
+    res.json({
+      id: staff.id,
+      name: staff.name,
+      role: staff.role,
+      username: staff.username
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// COUNTER ROUTE 2: Fetch Active Doctor Prescriptions Sent to Counter (flag = 2)
+// ============================================================================
+app.get('/api/counter/prescriptions', async (req, res) => {
+  try {
+    const { data: tickets, error: tickErr } = await supabase
+      .from('ticket_master')
+      .select('*')
+      .eq('flag', 2)
+      .order('id', { ascending: true })
+      .limit(50);
+
+    if (tickErr) throw tickErr;
+    if (!tickets || tickets.length === 0) return res.json([]);
+
+    const patientIds = [...new Set(tickets.map(t => t.patient_id).filter(Boolean))];
+    const ticketIds = tickets.map(t => t.id);
+
+    const [{ data: patients }, { data: channelings }, { data: doctors }] = await Promise.all([
+      supabase.from('patients_master').select('id, name, phone, birth_date, gender').in('id', patientIds),
+      supabase.from('channeling_master').select('ticket_id, general, reason_remarks, insert_date').in('ticket_id', ticketIds).order('id', { ascending: false }),
+      supabase.from('doctors_master').select('id, name')
+    ]);
+
+    const patMap = {};
+    (patients || []).forEach(p => { patMap[p.id] = p; });
+
+    const rxMap = {};
+    (channelings || []).forEach(c => {
+      if (!rxMap[c.ticket_id]) rxMap[c.ticket_id] = c;
+    });
+
+    const docMap = {};
+    (doctors || []).forEach(d => { docMap[d.id] = d.name; });
+
+    const list = tickets
+      .map(t => ({
+        ticket_id: t.id,
+        ticket_number: t.number || t.id,
+        doctor_name: docMap[t.channeling_doctor_id] || 'Consulting Physician',
+        patient: patMap[t.patient_id] || null,
+        prescription: rxMap[t.id]?.general || 'Consultation Completed (No shorthand text)',
+        sent_at: rxMap[t.id]?.insert_date || t.insert_date
+      }))
+      .filter(item => item.patient !== null);
+
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// COUNTER ROUTE 3: Load Medicines & Dispensary Services Catalog
+// ============================================================================
+app.get('/api/counter/catalog', async (req, res) => {
+  try {
+    const [{ data: medicines, error: medErr }, { data: services, error: srvErr }] = await Promise.all([
+      supabase.from('medicines_master').select('*').eq('flag', 1).order('name', { ascending: true }),
+      supabase.from('clinic_services_master').select('*').eq('flag', 1).order('id', { ascending: true })
+    ]);
+
+    if (medErr) throw medErr;
+    if (srvErr) throw srvErr;
+
+    res.json({
+      medicines: medicines || [],
+      services: services || []
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// COUNTER ROUTE 4: Save or Auto-Update Medicine Price in Database
+// ============================================================================
+app.post('/api/counter/medicines/upsert', async (req, res) => {
+  try {
+    const { id, name, unit_price } = req.body;
+    const cleanName = (name || '').trim();
+    const cleanPrice = Number(unit_price) || 0;
+
+    if (!cleanName) {
+      return res.status(400).json({ error: 'Medicine name is required' });
+    }
+
+    if (id) {
+      const { data, error } = await supabase
+        .from('medicines_master')
+        .update({ unit_price: cleanPrice, updated_at: new Date().toISOString() })
+        .eq('id', id)
+        .select()
+        .single();
+      if (error) throw error;
+      return res.json(data);
+    } else {
+      const { data, error } = await supabase
+        .from('medicines_master')
+        .upsert([{ name: cleanName, unit_price: cleanPrice, updated_at: new Date().toISOString(), flag: 1 }], { onConflict: 'name' })
+        .select()
+        .single();
+      if (error) throw error;
+      return res.json(data);
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// COUNTER ROUTE 5: Check & Clear Doctor Bell Alerts
+// ============================================================================
+app.get('/api/counter/alerts', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('counter_alerts')
+      .select('*')
+      .eq('alert_type', 'BELL_RING')
+      .order('id', { ascending: false })
+      .limit(1);
+
+    if (error) throw error;
+    res.json(data && data.length > 0 ? data[0] : null);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// COUNTER ROUTE 6: Complete POS Checkout OR Outdoor Rx Removal
+// ============================================================================
+app.post('/api/counter/checkout', async (req, res) => {
+  try {
+    const {
+      ticket_ids,
+      patient_names,
+      patient_phone,
+      doctor_name,
+      bill_status,
+      calculated_total,
+      final_total,
+      items_snapshot,
+      created_by
+    } = req.body;
+
+    // 1. Mark all selected tickets as flag = 3 (Completed / Removed from Queue)
+    if (Array.isArray(ticket_ids) && ticket_ids.length > 0) {
+      const { error: tickErr } = await supabase
+        .from('ticket_master')
+        .update({
+          flag: 3,
+          billing_amount: Number(final_total) || 0
+        })
+        .in('id', ticket_ids);
+
+      if (tickErr) throw tickErr;
+    }
+
+    // 2. Save Bill Record
+    const { data: bill, error: billErr } = await supabase
+      .from('pharmacy_bills')
+      .insert([{
+        ticket_ids: ticket_ids || [],
+        patient_names: patient_names || 'Walk-In Patient',
+        patient_phone: patient_phone || '',
+        doctor_name: doctor_name || 'Consulting Physician',
+        bill_status: bill_status || 'COMPLETED_BILL',
+        calculated_total: Number(calculated_total) || 0,
+        final_total: Number(final_total) || 0,
+        items_snapshot: items_snapshot || [],
+        created_by: created_by || 'Counter'
+      }])
+      .select()
+      .single();
+
+    if (billErr) throw billErr;
+    res.json({ success: true, bill });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
