@@ -96,18 +96,33 @@ app.post('/api/doctor/login', async (req, res) => {
 });
 
 // ============================================================================
-// ROUTE 2: Get Active Waiting Queue for Today
+// ROUTE 2: Get Active Waiting Queue for Today (Strictly Today + Auto-Cleanup)
 // ============================================================================
 app.get('/api/doctor/queue', async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    // Get exact YYYY-MM-DD in Sri Lanka Time
+    const todaySL = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Colombo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(new Date());
 
+    // Futureproof Auto-Cleanup: Cancel any leftover flag=1 or flag=2 tickets from past dates
+    await supabase
+      .from('ticket_master')
+      .update({ flag: 0 })
+      .in('flag', [1, 2])
+      .lt('channeling_date', todaySL);
+
+    // Strictly fetch ONLY today's active waiting queue (flag = 1 AND channeling_date = todaySL)
     const { data: tickets, error: ticketErr } = await supabase
       .from('ticket_master')
       .select('*')
       .eq('flag', 1)
+      .eq('channeling_date', todaySL)
       .order('id', { ascending: true })
-      .limit(50);
+      .limit(100);
 
     if (ticketErr) throw ticketErr;
     if (!tickets || tickets.length === 0) return res.json([]);
@@ -115,7 +130,7 @@ app.get('/api/doctor/queue', async (req, res) => {
     const patientIds = [...new Set(tickets.map(t => t.patient_id).filter(Boolean))];
     const { data: patients, error: patErr } = await supabase
       .from('patients_master')
-      .select('id, name, phone, birth_date, gender, common, reference, id_number, weight, height')
+      .select('id, name, phone, birth_date, gender, married, common, reference, id_number, weight, height')
       .in('id', patientIds);
 
     if (patErr) throw patErr;
@@ -124,10 +139,12 @@ app.get('/api/doctor/queue', async (req, res) => {
     (patients || []).forEach(p => { patientMap[p.id] = p; });
 
     const queue = tickets
-      .map(t => ({
+      .map((t, idx) => ({
         ticket_id: t.id,
-        ticket_number: t.number || t.id,
-        channeling_date: t.channeling_date || today,
+        daily_queue_no: idx + 1,
+        ticket_number: t.number || idx + 1,
+        channeling_date: t.channeling_date,
+        insert_date: t.insert_date,
         patient: patientMap[t.patient_id] || null
       }))
       .filter(item => item.patient !== null);
@@ -981,6 +998,83 @@ app.post('/api/counter/send-sms', async (req, res) => {
   }
 });
 
+// ============================================================================
+// COUNTER ROUTE 9: Add Patient to Today's Active Doctor Queue (flag = 1)
+// ============================================================================
+app.post('/api/counter/queue/add', async (req, res) => {
+  try {
+    const { patient_id, doctor_id } = req.body;
+    if (!patient_id) {
+      return res.status(400).json({ error: 'Patient ID is required.' });
+    }
+
+    const { dateStr: todaySL } = getSriLankaTodayRange();
+
+    // Prevent accidental duplicate queue entries for the same patient today
+    const { data: existingWaiting } = await supabase
+      .from('ticket_master')
+      .select('id, number')
+      .eq('patient_id', Number(patient_id))
+      .eq('channeling_date', todaySL)
+      .eq('flag', 1)
+      .limit(1);
+
+    if (existingWaiting && existingWaiting.length > 0) {
+      return res.status(400).json({ error: 'This patient is already in today\'s active waiting queue.' });
+    }
+
+    // Calculate today's daily ticket number starting from 1
+    const { count: todayTicketsCount } = await supabase
+      .from('ticket_master')
+      .select('id', { count: 'exact', head: true })
+      .eq('channeling_date', todaySL);
+
+    const nextDailyNumber = (todayTicketsCount || 0) + 1;
+    const nextTicketId = await getNextId('ticket_master');
+
+    const { data: newTicket, error: insErr } = await supabase
+      .from('ticket_master')
+      .insert([{
+        id: nextTicketId,
+        number: nextDailyNumber,
+        booking_method: 'Counter Queue',
+        timeframe_id: 1,
+        patient_id: Number(patient_id),
+        channeling_date: todaySL,
+        channeling_doctor_id: doctor_id || 1,
+        institutional_fee: 0,
+        billing_amount: 0,
+        insert_by_id: 1,
+        insert_date: new Date().toISOString(),
+        flag: 1
+      }])
+      .select()
+      .single();
+
+    if (insErr) throw insErr;
+    res.json({ success: true, ticket: newTicket, daily_number: nextDailyNumber });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// COUNTER ROUTE 10: Remove / Cancel Patient from Active Queue (Walk-Out -> flag = 0)
+// ============================================================================
+app.put('/api/counter/queue/:ticketId/cancel', async (req, res) => {
+  try {
+    const ticketId = Number(req.params.ticketId);
+    const { error } = await supabase
+      .from('ticket_master')
+      .update({ flag: 0 })
+      .eq('id', ticketId);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Wellspring Backend API running on http://localhost:${PORT}`);
