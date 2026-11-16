@@ -443,7 +443,6 @@ app.put('/api/patients/:id/allergies-reports', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 // ============================================================================
 // ROUTE 8: Submit Prescription ("To Counter")
 // ============================================================================
@@ -455,34 +454,68 @@ app.post('/api/doctor/prescribe', async (req, res) => {
       return res.status(400).json({ error: 'Patient and prescription text are required.' });
     }
 
-    const now = new Date().toISOString();
-    const today = now.split('T')[0];
-    let finalTicketId = ticket_id;
+    // 1. Build true Sri Lanka Date (YYYY-MM-DD) and Timestamp (+05:30) without .toISOString() UTC conversion
+    const now = new Date();
+    const slDateStr = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Colombo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(now);
 
+    const slTimeStr = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Colombo',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).format(now);
+
+    // Exact Sri Lanka timestamp for database storage (never rolls back to yesterday)
+    const slTimestamp = `${slDateStr}T${slTimeStr}+05:30`;
+
+    let finalTicketId = ticket_id ? Number(ticket_id) : null;
+
+    // 2. If prescribing from "Find Patient", ticket_id is null -> Generate next safe ID manually
     if (!finalTicketId) {
-      finalTicketId = await getNextId('ticket_master');
-      const { error: createTickErr } = await supabase.from('ticket_master').insert([{
-        id: finalTicketId,
-        number: finalTicketId,
-        booking_method: 'Direct Consult',
-        timeframe_id: 1,
-        patient_id: Number(patient_id),
-        channeling_date: today,
-        channeling_doctor_id: doctor_id || 1,
-        institutional_fee: 0,
-        billing_amount: 0,
-        insert_by_id: doctor_id || 1,
-        insert_date: now,
-        flag: 2 
-      }]);
+      const { data: maxTicketRow } = await supabase
+        .from('ticket_master')
+        .select('id')
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      finalTicketId = (maxTicketRow?.id ? Number(maxTicketRow.id) : 0) + 1;
+
+      const { error: createTickErr } = await supabase
+        .from('ticket_master')
+        .insert([{
+          id: finalTicketId,
+          number: finalTicketId,
+          booking_method: 'Direct Consult',
+          timeframe_id: 1,
+          patient_id: Number(patient_id),
+          channeling_date: slDateStr,
+          channeling_doctor_id: doctor_id || 1,
+          institutional_fee: 0,
+          billing_amount: 0,
+          insert_by_id: doctor_id || 1,
+          insert_date: slTimestamp,
+          flag: 2
+        }]);
+
       if (createTickErr) throw createTickErr;
     } else {
-      await supabase
+      // If prescribing from Queue, update existing ticket to flag = 2 (Sent to Counter)
+      const { error: updTickErr } = await supabase
         .from('ticket_master')
         .update({ flag: 2, channeling_doctor_id: doctor_id || 1 })
         .eq('id', finalTicketId);
+
+      if (updTickErr) throw updTickErr;
     }
 
+    // 3. Insert or Update channeling_master with explicit ID generation
     const { data: existingChanneling } = await supabase
       .from('channeling_master')
       .select('id')
@@ -497,16 +530,25 @@ app.post('/api/doctor/prescribe', async (req, res) => {
         .update({
           general: general.trim(),
           reason_remarks: reason_remarks || '',
-          insert_date: now,
+          insert_date: slTimestamp,
           flag: 1
         })
         .eq('id', existingChanneling[0].id)
         .select()
         .single();
+
       if (error) throw error;
       channelingRow = data;
     } else {
-      const nextChannelingId = await getNextId('channeling_master');
+      const { data: maxChanRow } = await supabase
+        .from('channeling_master')
+        .select('id')
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const nextChannelingId = (maxChanRow?.id ? Number(maxChanRow.id) : 0) + 1;
+
       const { data, error } = await supabase
         .from('channeling_master')
         .insert([{
@@ -515,20 +557,23 @@ app.post('/api/doctor/prescribe', async (req, res) => {
           reason_remarks: reason_remarks || '',
           general: general.trim(),
           insert_by_id: doctor_id || 1,
-          insert_date: now,
+          insert_date: slTimestamp,
           flag: 1
         }])
         .select()
         .single();
+
       if (error) throw error;
       channelingRow = data;
     }
 
+    // 4. Update patient's last visit date in Sri Lanka time
     await supabase
       .from('patients_master')
-      .update({ last_visit_date: now })
+      .update({ last_visit_date: slTimestamp })
       .eq('id', Number(patient_id));
 
+    // 5. Notify Counter
     await supabase.from('counter_alerts').insert([{
       alert_type: 'NEW_PRESCRIPTION',
       doctor_id: doctor_id || 1,
@@ -538,16 +583,12 @@ app.post('/api/doctor/prescribe', async (req, res) => {
       message: general.trim()
     }]);
 
-    res.json({
-      success: true,
-      ticket_id: finalTicketId,
-      channeling: channelingRow
-    });
+    res.json({ success: true, ticket_id: finalTicketId, channeling: channelingRow });
   } catch (err) {
+    console.error('Prescribe Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
-
 // ============================================================================
 // ROUTE 9: Ring Counter Bell
 // ============================================================================
@@ -797,20 +838,14 @@ app.post('/api/counter/checkout', async (req, res) => {
       created_by
     } = req.body;
 
-    // 1. Mark all selected tickets as flag = 3 (Completed / Removed from Queue)
     if (Array.isArray(ticket_ids) && ticket_ids.length > 0) {
       const { error: tickErr } = await supabase
         .from('ticket_master')
-        .update({
-          flag: 3,
-          billing_amount: Number(final_total) || 0
-        })
+        .update({ flag: 3, billing_amount: Number(final_total) || 0 })
         .in('id', ticket_ids);
-
       if (tickErr) throw tickErr;
     }
 
-    // 2. Count how many bills were already created TODAY so Bill # starts at #1 each day
     const { startISO, endISO } = getSriLankaTodayRange();
     const { count: todayCount } = await supabase
       .from('pharmacy_bills')
@@ -820,7 +855,11 @@ app.post('/api/counter/checkout', async (req, res) => {
 
     const dailyBillNumber = (todayCount || 0) + 1;
 
-    // 3. Save Bill Record
+    // FIX: Calculate RAW MEDICINE COST for the Admin Profit calculation
+    const totalMedicineCost = (items_snapshot || [])
+      .filter(item => item.item_type === 'MEDICINE')
+      .reduce((sum, item) => sum + (Number(item.line_total) || 0), 0);
+
     const { data: bill, error: billErr } = await supabase
       .from('pharmacy_bills')
       .insert([{
@@ -831,6 +870,7 @@ app.post('/api/counter/checkout', async (req, res) => {
         bill_status: bill_status || 'COMPLETED_BILL',
         calculated_total: Number(calculated_total) || 0,
         final_total: Number(final_total) || 0,
+        total_medicine_cost: totalMedicineCost, // Saved safely in the background!
         items_snapshot: items_snapshot || [],
         created_by: created_by || 'Counter'
       }])
@@ -839,18 +879,11 @@ app.post('/api/counter/checkout', async (req, res) => {
 
     if (billErr) throw billErr;
 
-    res.json({
-      success: true,
-      bill: {
-        ...bill,
-        daily_bill_no: dailyBillNumber
-      }
-    });
+    res.json({ success: true, bill: { ...bill, daily_bill_no: dailyBillNumber } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
 // ============================================================================
 // COUNTER ROUTE 7: Get Today's Log with Daily Bill Numbers (#1, #2, #3...)
 // ============================================================================
