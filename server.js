@@ -575,6 +575,128 @@ app.put('/api/patients/:id/marital-status', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ============================================================================
+// COUNTER ROUTE 7: Get Today's Sales & Patient Log (For "Today's Log" Tab)
+// ============================================================================
+app.get('/api/counter/today-log', async (req, res) => {
+  try {
+    // Calculate start and end of today in Sri Lanka Time (UTC+5:30)
+    const now = new Date();
+    const slOffsetMs = 5.5 * 60 * 60 * 1000;
+    const slDateStr = new Date(now.getTime() + slOffsetMs).toISOString().split('T')[0];
+
+    const startOfDayISO = `${slDateStr}T00:00:00.000+05:30`;
+    const endOfDayISO = `${slDateStr}T23:59:59.999+05:30`;
+
+    const { data, error } = await supabase
+      .from('pharmacy_bills')
+      .select('*')
+      .gte('created_at', startOfDayISO)
+      .lte('created_at', endOfDayISO)
+      .order('id', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// COUNTER ROUTE 8: Confirm/Update Phone Number & Dispatch SMS via Dialog eSMS
+// ============================================================================
+app.post('/api/counter/send-sms', async (req, res) => {
+  try {
+    const { bill_id, ticket_ids, phone, patient_names, final_total, date_str } = req.body;
+
+    if (!phone || !phone.trim()) {
+      return res.status(400).json({ error: 'A valid mobile number is required to send SMS.' });
+    }
+
+    const rawPhone = phone.trim().replace(/\s+/g, '');
+
+    // Format for Sri Lanka Dialog eSMS (e.g. 0771234567 -> 94771234567)
+    let dialogFormattedPhone = rawPhone;
+    if (dialogFormattedPhone.startsWith('+94')) {
+      dialogFormattedPhone = dialogFormattedPhone.replace('+94', '94');
+    } else if (dialogFormattedPhone.startsWith('0')) {
+      dialogFormattedPhone = '94' + dialogFormattedPhone.substring(1);
+    } else if (dialogFormattedPhone.length === 9) {
+      dialogFormattedPhone = '94' + dialogFormattedPhone;
+    }
+
+    // 1. Update phone number in pharmacy_bills if bill_id exists
+    if (bill_id) {
+      await supabase
+        .from('pharmacy_bills')
+        .update({ patient_phone: rawPhone })
+        .eq('id', bill_id);
+    }
+
+    // 2. Also update the patient's master record if they edited their mobile number
+    if (Array.isArray(ticket_ids) && ticket_ids.length > 0) {
+      const { data: tickData } = await supabase
+        .from('ticket_master')
+        .select('patient_id')
+        .in('id', ticket_ids)
+        .limit(1);
+
+      if (tickData && tickData.length > 0 && tickData[0].patient_id) {
+        await supabase
+          .from('patients_master')
+          .update({ phone: rawPhone })
+          .eq('id', tickData[0].patient_id);
+      }
+    }
+
+    // 3. Construct Summary-Only SMS Text (No individual medicine breakdown)
+    const smsMessage =
+      `Wellspring Medical Center\n` +
+      `Receipt #${bill_id || 'POS'}\n` +
+      `Patient: ${patient_names}\n` +
+      `Date: ${date_str}\n` +
+      `Total Paid: Rs. ${Number(final_total).toFixed(2)}\n` +
+      `Thank you. Wishing you good health!`;
+
+    // 4. Check if Dialog eSMS API Key is configured in backend/.env
+    const dialogApiKey = process.env.DIALOG_SMS_API_KEY;
+    const dialogMask = process.env.DIALOG_SMS_MASK || 'Wellspring';
+
+    if (dialogApiKey) {
+      // Live Dialog eSMS URL Campaign API Call
+      const dialogUrl =
+        `https://e-sms.dialog.lk/api/v1/message-via-url/create/url-campaign` +
+        `?esmsqk=${encodeURIComponent(dialogApiKey)}` +
+        `&list=${encodeURIComponent(dialogFormattedPhone)}` +
+        `&source_address=${encodeURIComponent(dialogMask)}` +
+        `&message=${encodeURIComponent(smsMessage)}`;
+
+      const response = await fetch(dialogUrl);
+      const resultText = await response.text();
+
+      return res.json({
+        success: true,
+        mode: 'LIVE_DIALOG_SMS',
+        sent_to: rawPhone,
+        gateway_response: resultText
+      });
+    }
+
+    // If DIALOG_SMS_API_KEY is not in .env yet, simulate success so you can test the UI
+    console.log(`\n--- [SIMULATED DIALOG SMS TO ${dialogFormattedPhone}] ---\n${smsMessage}\n--------------------------------------------\n`);
+    res.json({
+      success: true,
+      mode: 'SIMULATED',
+      sent_to: rawPhone,
+      message: smsMessage
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`Wellspring Backend API running on http://localhost:${PORT}`);
 });
