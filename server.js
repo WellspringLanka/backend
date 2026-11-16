@@ -881,118 +881,103 @@ app.get('/api/counter/today-log', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 // ============================================================================
-// COUNTER ROUTE 8: Fail-Safe Dialog SMS Dispatch (Walk-In vs Registered Patient)
+// ROUTE 8: Submit Prescription ("To Counter")
 // ============================================================================
-app.post('/api/counter/send-sms', async (req, res) => {
+app.post('/api/doctor/prescribe', async (req, res) => {
   try {
-    const { bill_id, daily_bill_no, ticket_ids, phone, patient_names, final_total, date_str } = req.body;
+    const { patient_id, ticket_id, general, reason_remarks, doctor_id, doctor_name, patient_name } = req.body;
 
-    if (!phone || !phone.trim()) {
-      return res.status(400).json({ error: 'Please enter a valid mobile number.' });
+    if (!patient_id || !general || !general.trim()) {
+      return res.status(400).json({ error: 'Patient and prescription text are required.' });
     }
 
-    const rawPhone = phone.trim().replace(/\s+/g, '');
+    const now = new Date().toISOString();
+    // FIX: Force Sri Lanka Time for accurate date logging
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Colombo' }).format(new Date());
+    
+    let finalTicketId = ticket_id;
 
-    // Format for Sri Lanka Dialog eSMS (0771234567 -> 94771234567)
-    let dialogFormattedPhone = rawPhone;
-    if (dialogFormattedPhone.startsWith('+94')) {
-      dialogFormattedPhone = dialogFormattedPhone.replace('+94', '94');
-    } else if (dialogFormattedPhone.startsWith('0')) {
-      dialogFormattedPhone = '94' + dialogFormattedPhone.substring(1);
-    } else if (dialogFormattedPhone.length === 9) {
-      dialogFormattedPhone = '94' + dialogFormattedPhone;
-    }
-
-    // ONLY save to patients_master if this is a registered patient (NOT a Walk-In)
-    let updatedPatientProfile = false;
-    if (Array.isArray(ticket_ids) && ticket_ids.length > 0) {
-      const { data: tickData } = await supabase
+    if (!finalTicketId) {
+      finalTicketId = await getNextId('ticket_master');
+      const { error: createTickErr } = await supabase.from('ticket_master').insert([{
+        id: finalTicketId,
+        number: finalTicketId,
+        booking_method: 'Direct Consult',
+        timeframe_id: 1,
+        patient_id: Number(patient_id),
+        channeling_date: today,
+        channeling_doctor_id: doctor_id || 1,
+        institutional_fee: 0,
+        billing_amount: 0,
+        insert_by_id: doctor_id || 1,
+        insert_date: now,
+        flag: 2 
+      }]);
+      if (createTickErr) throw createTickErr;
+    } else {
+      await supabase
         .from('ticket_master')
-        .select('patient_id')
-        .in('id', ticket_ids)
-        .limit(1);
-
-      if (tickData && tickData.length > 0 && tickData[0].patient_id) {
-        await supabase
-          .from('patients_master')
-          .update({ phone: rawPhone })
-          .eq('id', tickData[0].patient_id);
-        updatedPatientProfile = true;
-      }
-
-      if (bill_id) {
-        await supabase
-          .from('pharmacy_bills')
-          .update({ patient_phone: rawPhone })
-          .eq('id', bill_id);
-      }
+        .update({ flag: 2, channeling_doctor_id: doctor_id || 1 })
+        .eq('id', finalTicketId);
     }
 
-    const receiptNumberToDisplay = daily_bill_no || bill_id || 1;
-    const smsMessage =
-      `Wellspring Medical Center\n` +
-      `Receipt #${receiptNumberToDisplay}\n` +
-      `Patient: ${patient_names}\n` +
-      `Date: ${date_str}\n` +
-      `Total Paid: Rs. ${Number(final_total).toFixed(2)}\n` +
-      `Thank you. Wishing you good health!`;
+    const { data: existingChanneling } = await supabase
+      .from('channeling_master')
+      .select('id')
+      .eq('ticket_id', finalTicketId)
+      .limit(1);
 
-    const dialogApiKey = process.env.DIALOG_SMS_API_KEY;
-    const dialogMask = process.env.DIALOG_SMS_MASK || 'Wellspring';
+    let channelingRow;
 
-    // Fail-Safe Dialog Gateway Call: Never crashes server if key is expired or offline
-    if (dialogApiKey) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 6000);
-
-        const dialogUrl =
-          `https://e-sms.dialog.lk/api/v1/message-via-url/create/url-campaign` +
-          `?esmsqk=${encodeURIComponent(dialogApiKey)}` +
-          `&list=${encodeURIComponent(dialogFormattedPhone)}` +
-          `&source_address=${encodeURIComponent(dialogMask)}` +
-          `&message=${encodeURIComponent(smsMessage)}`;
-
-        const response = await fetch(dialogUrl, { signal: controller.signal });
-        clearTimeout(timeout);
-        const resultText = await response.text();
-
-        // Dialog eSMS returns "1" on success, or error codes if key expired/invalid
-        if (!response.ok || (resultText && resultText.trim() !== '1')) {
-          return res.json({
-            success: false,
-            gateway_warning: `Dialog SMS Gateway rejected request (Code: ${resultText}). Check API key or balance.`,
-            sent_to: rawPhone,
-            updatedPatientProfile
-          });
-        }
-
-        return res.json({
-          success: true,
-          mode: 'LIVE_DIALOG_SMS',
-          sent_to: rawPhone,
-          updatedPatientProfile
-        });
-      } catch (networkErr) {
-        // Caught safely without crashing Node server
-        return res.json({
-          success: false,
-          gateway_warning: 'Dialog SMS Gateway unreachable or timed out. Server is safe.',
-          sent_to: rawPhone,
-          updatedPatientProfile
-        });
-      }
+    if (existingChanneling && existingChanneling.length > 0) {
+      const { data, error } = await supabase
+        .from('channeling_master')
+        .update({
+          general: general.trim(),
+          reason_remarks: reason_remarks || '',
+          insert_date: now,
+          flag: 1
+        })
+        .eq('id', existingChanneling[0].id)
+        .select()
+        .single();
+      if (error) throw error;
+      channelingRow = data;
+    } else {
+      const nextChannelingId = await getNextId('channeling_master');
+      const { data, error } = await supabase
+        .from('channeling_master')
+        .insert([{
+          id: nextChannelingId,
+          ticket_id: finalTicketId,
+          reason_remarks: reason_remarks || '',
+          general: general.trim(),
+          insert_by_id: doctor_id || 1,
+          insert_date: now,
+          flag: 1
+        }])
+        .select()
+        .single();
+      if (error) throw error;
+      channelingRow = data;
     }
 
-    // Simulation mode when no DIALOG_SMS_API_KEY is in .env
-    return res.json({
-      success: true,
-      mode: 'SIMULATED',
-      sent_to: rawPhone,
-      updatedPatientProfile
-    });
+    await supabase
+      .from('patients_master')
+      .update({ last_visit_date: now })
+      .eq('id', Number(patient_id));
+
+    await supabase.from('counter_alerts').insert([{
+      alert_type: 'NEW_PRESCRIPTION',
+      doctor_id: doctor_id || 1,
+      doctor_name: doctor_name || 'Doctor',
+      ticket_id: finalTicketId,
+      patient_name: patient_name || 'Patient',
+      message: general.trim()
+    }]);
+
+    res.json({ success: true, ticket_id: finalTicketId, channeling: channelingRow });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1071,6 +1056,23 @@ app.put('/api/counter/queue/:ticketId/cancel', async (req, res) => {
 
     if (error) throw error;
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// ROUTE 11: Update Gender in patients_master
+// ============================================================================
+app.put('/api/patients/:id/gender', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('patients_master')
+      .update({ gender: Number(req.body.gender) })
+      .eq('id', Number(req.params.id))
+      .select().single();
+    if (error) throw error;
+    res.json({ success: true, gender: data.gender });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
