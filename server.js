@@ -1209,6 +1209,134 @@ app.get('/api/admin/demographics', async (req, res) => {
 });
 
 
+// ============================================================================
+// ADMIN ROUTE 4: Daily Business Spreadsheet Log (With Timezone Safety)
+// ============================================================================
+app.get('/api/admin/daily-log', async (req, res) => {
+  try {
+    const { date } = req.query; // Expects YYYY-MM-DD
+    if (!date) return res.status(400).json({ error: 'Date is required' });
+
+    const startIso = `${date}T00:00:00.000+05:30`;
+    const endIso = `${date}T23:59:59.999+05:30`;
+
+    const { data, error } = await supabase
+      .from('pharmacy_bills')
+      .select('*')
+      .gte('created_at', startIso)
+      .lte('created_at', endIso)
+      .order('id', { ascending: true });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// ADMIN ROUTE 5: Get All Registered Users (Doctors & Cashiers)
+// ============================================================================
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const [docs, cashiers] = await Promise.all([
+      supabase.from('doctors_master').select('id, name, username, specialty').eq('flag', 1),
+      supabase.from('counter_staff_master').select('id, name, username, role').eq('flag', 1)
+    ]);
+    res.json({
+      doctors: docs.data || [],
+      cashiers: cashiers.data || []
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// ADMIN ROUTE 6: Register New Doctor or Cashier
+// ============================================================================
+app.post('/api/admin/users', async (req, res) => {
+  try {
+    const { role_type, name, username, password, specialty_or_role } = req.body;
+    if (!name || !username || !password) return res.status(400).json({ error: 'Missing fields' });
+
+    const bcrypt = require('bcrypt');
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const table = role_type === 'DOCTOR' ? 'doctors_master' : 'counter_staff_master';
+    
+    const payload = {
+      name, username, password: hashedPassword,
+      ...(role_type === 'DOCTOR' ? { specialty: specialty_or_role } : { role: specialty_or_role })
+    };
+
+    const { data, error } = await supabase.from(table).insert([payload]).select().single();
+    if (error) {
+      if (error.code === '23505') return res.status(400).json({ error: 'Username already exists.' });
+      throw error;
+    }
+    res.json({ success: true, user: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// ADMIN ROUTE 7: Delete User (Soft Delete)
+// ============================================================================
+app.delete('/api/admin/users/:type/:id', async (req, res) => {
+  try {
+    const table = req.params.type === 'DOCTOR' ? 'doctors_master' : 'counter_staff_master';
+    const { error } = await supabase.from(table).update({ flag: 0 }).eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// GRN ROUTE 1: Universal Login (Accepts Admin, Doctor, OR Counter)
+// ============================================================================
+app.post('/api/grn/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'Credentials required.' });
+
+    const bcrypt = require('bcrypt');
+    
+    // Check all 3 tables concurrently
+    const [adminRes, docRes, counterRes] = await Promise.all([
+      supabase.from('admin_master').select('*').eq('username', username.trim()).eq('flag', 1).maybeSingle(),
+      supabase.from('doctors_master').select('*').eq('username', username.trim()).eq('flag', 1).maybeSingle(),
+      supabase.from('counter_staff_master').select('*').eq('username', username.trim()).eq('flag', 1).maybeSingle()
+    ]);
+
+    let user = adminRes.data || docRes.data || counterRes.data;
+    if (!user) return res.status(401).json({ error: 'Invalid credentials.' });
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(401).json({ error: 'Invalid credentials.' });
+
+    res.json({ id: user.id, name: user.name, username: user.username, access: 'GRANTED' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// GRN ROUTE 2: Delete/Remove Medicine from Catalog
+// ============================================================================
+app.delete('/api/grn/medicines/:id', async (req, res) => {
+  try {
+    // We can safely hard-delete from the catalog because pharmacy_bills uses a JSON snapshot (items_snapshot) 
+    // that permanently preserves the name and price of the item at the time it was sold.
+    const { error } = await supabase.from('medicines_master').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Wellspring Backend API running on http://localhost:${PORT}`);
