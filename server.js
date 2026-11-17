@@ -1128,6 +1128,7 @@ app.post('/api/admin/login', async (req, res) => {
 
     if (error || !admin) return res.status(401).json({ error: 'Invalid admin credentials.' });
 
+    const bcrypt = require('bcryptjs'); // FIX: Using bcryptjs
     const isMatch = await bcrypt.compare(password, admin.password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid admin credentials.' });
 
@@ -1260,7 +1261,7 @@ app.post('/api/admin/users', async (req, res) => {
     const { role_type, name, username, password, specialty_or_role } = req.body;
     if (!name || !username || !password) return res.status(400).json({ error: 'Missing fields' });
 
-    const bcrypt = require('bcrypt');
+    const bcrypt = require('bcryptjs'); // FIX: Using bcryptjs
     const hashedPassword = await bcrypt.hash(password, 10);
     const table = role_type === 'DOCTOR' ? 'doctors_master' : 'counter_staff_master';
     
@@ -1302,7 +1303,7 @@ app.post('/api/grn/login', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Credentials required.' });
 
-    const bcrypt = require('bcrypt');
+    const bcrypt = require('bcryptjs'); // FIX: Using bcryptjs
     
     // Check all 3 tables concurrently
     const [adminRes, docRes, counterRes] = await Promise.all([
