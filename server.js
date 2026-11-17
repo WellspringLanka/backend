@@ -1111,6 +1111,105 @@ app.put('/api/patients/:id/gender', async (req, res) => {
   }
 });
 
+// ============================================================================
+// ADMIN ROUTE 1: Encrypted Admin Login
+// ============================================================================
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
+
+    const { data: admin, error } = await supabase
+      .from('admin_master')
+      .select('id, name, username, password')
+      .eq('username', username.trim())
+      .eq('flag', 1)
+      .single();
+
+    if (error || !admin) return res.status(401).json({ error: 'Invalid admin credentials.' });
+
+    const isMatch = await bcrypt.compare(password, admin.password);
+    if (!isMatch) return res.status(401).json({ error: 'Invalid admin credentials.' });
+
+    res.json({ id: admin.id, name: admin.name, username: admin.username, role: 'Administrator' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// ADMIN ROUTE 2: Financial Dashboard Analytics (Powered by Postgres RPC)
+// ============================================================================
+app.get('/api/admin/finance', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    // Default to a vast range if ALL time is selected (covers 2010 to 2050)
+    const startIso = startDate ? `${startDate}T00:00:00.000+05:30` : '2010-01-01T00:00:00.000+05:30';
+    const endIso = endDate ? `${endDate}T23:59:59.999+05:30` : '2050-12-31T23:59:59.999+05:30';
+
+    // Execute all 3 heavy data crunching functions concurrently inside the database
+    const [
+      { data: finData, error: finErr },
+      { data: topMeds, error: medErr },
+      { data: traffic, error: trafErr }
+    ] = await Promise.all([
+      supabase.rpc('get_financial_metrics', { start_d: startIso, end_d: endIso }),
+      supabase.rpc('get_top_medicines', { start_d: startIso, end_d: endIso }),
+      supabase.rpc('get_weekly_traffic', { start_d: startIso, end_d: endIso })
+    ]);
+
+    if (finErr) throw finErr;
+    if (medErr) throw medErr;
+    if (trafErr) throw trafErr;
+
+    res.json({
+      summary: finData.summary,
+      chartData: finData.daily,
+      topMedicines: topMeds,
+      weeklyTraffic: traffic
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// ADMIN ROUTE 3: Patient Demographics & Age Bell Curve (Powered by Postgres RPC)
+// ============================================================================
+app.get('/api/admin/demographics', async (req, res) => {
+  try {
+    // This calls the SQL function we created, bypassing the 1000-row limit!
+    const { data, error } = await supabase.rpc('get_patient_demographics');
+    
+    if (error) throw error;
+
+    const bellCurveData = Object.keys(data.age).map(range => ({
+      ageGroup: range,
+      patients: data.age[range]
+    }));
+
+    const genderData = [
+      { name: 'Male', value: data.gender.male, fill: '#38bdf8' },
+      { name: 'Female', value: data.gender.female, fill: '#f472b6' },
+      { name: 'Not Specified', value: data.gender.unspecified, fill: '#64748b' }
+    ];
+
+    res.json({
+      bellCurveData,
+      genderData,
+      totalRegistered: data.total
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
+
+
 app.listen(PORT, () => {
   console.log(`Wellspring Backend API running on http://localhost:${PORT}`);
 });
