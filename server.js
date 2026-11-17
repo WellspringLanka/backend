@@ -1339,6 +1339,130 @@ app.delete('/api/grn/medicines/:id', async (req, res) => {
   }
 });
 
+// ============================================================================
+// COUNTER SMS ROUTE: Update Patient Phone & Dispatch Dialog eSMS Receipt
+// ============================================================================
+app.post('/api/counter/send-sms', async (req, res) => {
+  try {
+    const {
+      bill_id,
+      daily_bill_no,
+      ticket_ids,
+      phone,
+      patient_names,
+      final_total,
+      date_str
+    } = req.body;
+
+    if (!phone || !phone.trim()) {
+      return res.status(400).json({ error: 'Phone number is required.' });
+    }
+
+    const cleanPhone = phone.trim();
+    let updatedPatientProfile = false;
+
+    // 1. Save the phone number to today's bill record
+    if (bill_id) {
+      await supabase
+        .from('pharmacy_bills')
+        .update({ patient_phone: cleanPhone })
+        .eq('id', bill_id);
+    }
+
+    // 2. If this was a queued patient (not a walk-in), update their master profile phone too
+    if (Array.isArray(ticket_ids) && ticket_ids.length > 0) {
+      const { data: tickets } = await supabase
+        .from('ticket_master')
+        .select('patient_id')
+        .in('id', ticket_ids);
+
+      const patientIds = [...new Set((tickets || []).map(t => t.patient_id).filter(Boolean))];
+
+      if (patientIds.length > 0) {
+        const { error: patErr } = await supabase
+          .from('patients_master')
+          .update({ phone: cleanPhone })
+          .in('id', patientIds);
+
+        if (!patErr) updatedPatientProfile = true;
+      }
+    }
+
+    // 3. Read Dialog credentials from environment variables
+    const apiKey = process.env.DIALOG_SMS_API_KEY;
+    const senderMask = process.env.DIALOG_SMS_MASK || 'Wellspring';
+
+    if (!apiKey) {
+      return res.json({
+        success: false,
+        gateway_warning: 'Phone saved, but DIALOG_SMS_API_KEY is not set in backend .env.',
+        updatedPatientProfile
+      });
+    }
+
+    // Format Sri Lankan number for Dialog (e.g., 0771234567 -> 94771234567)
+    let formattedPhone = cleanPhone.replace(/\D/g, '');
+    if (formattedPhone.startsWith('0') && formattedPhone.length === 10) {
+      formattedPhone = '94' + formattedPhone.substring(1);
+    }
+
+    // Build SMS Receipt Text
+    const smsMessage =
+      `Wellspring Health Care\n` +
+      `Bill No: #${daily_bill_no || bill_id}\n` +
+      `Date: ${date_str || 'Today'}\n` +
+      `Patient: ${patient_names || 'Walk-In'}\n` +
+      `Total Paid: Rs. ${Number(final_total || 0).toFixed(2)}\n` +
+      `Thank you for visiting Wellspring!`;
+
+    // Build Dialog eSMS URL Campaign endpoint
+    const dialogUrl =
+      `https://e-sms.dialog.lk/api/v1/message-via-url/create/url-campaign` +
+      `?esmsqk=${encodeURIComponent(apiKey)}` +
+      `&list=${encodeURIComponent(formattedPhone)}` +
+      `&source_address=${encodeURIComponent(senderMask)}` +
+      `&message=${encodeURIComponent(smsMessage)}`;
+
+    // 4. Dispatch with an 8-second fail-safe timeout so the server never hangs
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    try {
+      const response = await fetch(dialogUrl, {
+        method: 'GET',
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+
+      const responseText = (await response.text()).trim();
+
+      // Dialog returns "1" when the message is accepted
+      if (responseText === '1' || response.ok) {
+        return res.json({
+          success: true,
+          updatedPatientProfile
+        });
+      } else {
+        return res.json({
+          success: false,
+          gateway_warning: `Phone saved, but Dialog rejected SMS (Code: ${responseText}).`,
+          updatedPatientProfile
+        });
+      }
+    } catch (networkErr) {
+      clearTimeout(timeout);
+      return res.json({
+        success: false,
+        gateway_warning: 'Phone saved, but Dialog SMS gateway timed out or is unreachable.',
+        updatedPatientProfile
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`Wellspring Backend API running on http://localhost:${PORT}`);
 });
