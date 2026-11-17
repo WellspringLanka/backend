@@ -1179,10 +1179,13 @@ app.get('/api/admin/finance', async (req, res) => {
 // ============================================================================
 app.get('/api/admin/demographics', async (req, res) => {
   try {
-    // This calls the SQL function we created, bypassing the 1000-row limit!
     const { data, error } = await supabase.rpc('get_patient_demographics');
     
-    if (error) throw error;
+    // NEW: If Supabase crashes, print the exact reason to the Node.js terminal
+    if (error) {
+      console.error("SUPABASE RPC CRASH ERROR:", error);
+      throw error;
+    }
 
     const bellCurveData = Object.keys(data.age).map(range => ({
       ageGroup: range,
@@ -1204,9 +1207,6 @@ app.get('/api/admin/demographics', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-
-
 
 
 
